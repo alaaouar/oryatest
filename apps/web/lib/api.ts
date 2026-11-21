@@ -60,7 +60,25 @@ import type {
   ConsentPurpose,
 } from "./types";
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:3200/api/v1";
+/**
+ * Résolution dynamique de l'URL de base de l'API :
+ * 1. Côté serveur (fonctions runtime Vercel, Server Actions, SSR) : lit la liaison interne injectée `API_URL`.
+ * 2. Côté client / build : variable d'environnement publique explicite `NEXT_PUBLIC_API_BASE`.
+ * 3. En production navigateur (même domaine avec réécriture Vercel Services `/api/(.*)` -> service api) : chemin relatif `/api/v1`.
+ * 4. Repli de développement local : http://localhost:3200/api/v1.
+ */
+export function getApiBase(): string {
+  if (typeof window === "undefined" && process.env.API_URL) {
+    return new URL("/api/v1", process.env.API_URL).toString().replace(/\/$/, "");
+  }
+  if (process.env.NEXT_PUBLIC_API_BASE) {
+    return process.env.NEXT_PUBLIC_API_BASE.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+    return "/api/v1";
+  }
+  return "http://localhost:3200/api/v1";
+}
 const STORAGE_KEY = "orya.session";
 
 /**
@@ -119,7 +137,7 @@ export async function ensureCsrf(force = false): Promise<boolean> {
     return true;
   }
   try {
-    const response = await fetch(`${BASE}/auth/csrf`, {
+    const response = await fetch(`${getApiBase()}/auth/csrf`, {
       method: "GET",
       headers: new Headers({ "X-Orya-Client": "web" }),
       credentials: "include",
@@ -166,7 +184,7 @@ async function refreshTokens(): Promise<boolean> {
     return false;
   }
 
-  const response = await fetch(`${BASE}/auth/refresh`, {
+  const response = await fetch(`${getApiBase()}/auth/refresh`, {
     method: "POST",
     headers: webHeaders(new Headers({ "Content-Type": "application/json" })),
     body: "{}",
@@ -191,7 +209,7 @@ async function call<T>(path: string, init: RequestInit, retry: boolean): Promise
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${BASE}${path}`, { ...init, headers, credentials: "include", cache: "no-store" });
+  const response = await fetch(`${getApiBase()}${path}`, { ...init, headers, credentials: "include", cache: "no-store" });
 
   if (response.status === 401 && retry) {
     if (await refreshTokens()) {
@@ -548,7 +566,7 @@ type ActivationSession = { csrfToken: string };
 
 /** Routes publiques : aucun jeton n'est envoyé. */
 async function publicPost<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(`${BASE}${path}`, {
+  const response = await fetch(`${getApiBase()}${path}`, {
     method: "POST",
     headers: webHeaders(new Headers({ "Content-Type": "application/json" })),
     body: JSON.stringify(body),
@@ -670,7 +688,7 @@ export function markAllNotificationsRead() {
  */
 export async function downloadPrivateFile(path: string, filename: string): Promise<void> {
   const attempt = async () => {
-    return fetch(`${BASE}${path}`, {
+    return fetch(`${getApiBase()}${path}`, {
       headers: webHeaders(),
       credentials: "include",
       cache: "no-store",

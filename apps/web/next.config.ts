@@ -12,12 +12,28 @@ import type { NextConfig } from "next";
 const isDev = process.env.NODE_ENV !== "production";
 
 function apiOrigin(): string {
+  const base = process.env.NEXT_PUBLIC_API_BASE;
+  if (!base || base.startsWith("/")) {
+    return isDev ? "http://localhost:3200" : "";
+  }
   try {
-    return new URL(process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:3200/api/v1").origin;
+    return new URL(base).origin;
   } catch {
-    return "http://localhost:3200";
+    return isDev ? "http://localhost:3200" : "";
   }
 }
+
+const apiHost = apiOrigin();
+const connectSrc = [
+  "'self'",
+  apiHost,
+  isDev ? "ws: wss:" : "",
+  "https://*.tile.openstreetmap.org",
+  "https://*.basemaps.cartocdn.com",
+  "https://nominatim.openstreetmap.org",
+]
+  .filter(Boolean)
+  .join(" ");
 
 const contentSecurityPolicy = [
   "default-src 'self'",
@@ -26,7 +42,7 @@ const contentSecurityPolicy = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://*.basemaps.cartocdn.com https://tile.openstreetmap.org",
   "font-src 'self' data:",
-  `connect-src 'self' ${apiOrigin()}${isDev ? " ws: wss:" : ""} https://*.tile.openstreetmap.org https://*.basemaps.cartocdn.com https://nominatim.openstreetmap.org`,
+  `connect-src ${connectSrc}`,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",

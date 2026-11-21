@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
+import { getApiBase } from "@/lib/api";
 import { LeafletMapAdapter, type LatLng } from "@/lib/map-adapter";
 import "leaflet/dist/leaflet.css";
 
@@ -120,7 +121,7 @@ export function LiveBusMap({
       return;
     }
 
-    const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:3200/api/v1";
+    const apiBase = getApiBase();
     const sseUrl = `${apiBase}/transport/trips/${trip.id}/live`;
 
     const eventSource = new EventSource(sseUrl, { withCredentials: true });

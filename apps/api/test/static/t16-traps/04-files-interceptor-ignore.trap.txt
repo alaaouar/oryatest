@@ -1,0 +1,16 @@
+import { Controller, Post, UploadedFiles, UseInterceptors } from "@nestjs/common";
+import { FilesInterceptor } from "@nestjs/platform-express";
+@Controller("trap-four")
+export class TrapFourController {
+  constructor(private readonly trapFour: TrapFourService) {}
+  @Post()
+  @UseInterceptors(FilesInterceptor("attachments", 3))
+  up(@UploadedFiles() files: any[]) {
+    return this.trapFour.countTrapFour(files);
+  }
+}
+export class TrapFourService {
+  async countTrapFour(files: any[]) {
+    return files.length;
+  }
+}

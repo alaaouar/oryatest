@@ -1,0 +1,17 @@
+import { Controller, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+@Controller("trap-one")
+export class TrapOneController {
+  constructor(private readonly trapOne: TrapOneService) {}
+  @Post()
+  @UseInterceptors(FileInterceptor("file"))
+  up(@UploadedFile() file: any) {
+    return this.trapOne.saveRawTrapOne(file);
+  }
+}
+export class TrapOneService {
+  constructor(private readonly storage: any) {}
+  async saveRawTrapOne(file: any) {
+    return this.storage.put("s", file);
+  }
+}

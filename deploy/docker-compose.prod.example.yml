@@ -1,0 +1,79 @@
+# ORYA - EXEMPLE de composition de production (lot 10). NE PAS lancer tel quel :
+# copier en docker-compose.prod.yml, remplir deploy/.env.prod (jamais commite),
+# placer un reverse proxy TLS (Caddy / Nginx) devant web et api.
+# Images locales taguees avec le SHA du commit (scripts/build-images.ps1, jamais poussees).
+# Ordre de demarrage : postgres (healthy) -> migrate (termine avec succes) -> api (healthy) -> web.
+name: orya-prod
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: orya
+      POSTGRES_USER: "${POSTGRES_ADMIN_USER:?POSTGRES_ADMIN_USER requis}"
+      POSTGRES_PASSWORD: "${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD requis}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_ADMIN_USER} -d orya"]
+      interval: 10s
+      retries: 10
+    # Pas de port publie : base accessible uniquement depuis le reseau interne.
+
+  # Job ponctuel et idempotent : prisma migrate deploy + 000_roles.sql + 010_rls.sql
+  # (cible "migrate" de Dockerfile.api, script compile, pas de tsx).
+  migrate:
+    # B03 : valeur entre guillemets (le " : " du message cassait le YAML, L26.C69).
+    image: "orya-api-migrate:${ORYA_IMAGE_TAG:?ORYA_IMAGE_TAG requis : SHA du commit, voir scripts/build-images.ps1}"
+    build: { context: .., dockerfile: deploy/Dockerfile.api, target: migrate }
+    environment:
+      # Prisma Migrate et le script SQL utilisent DIRECT_DATABASE_URL (administrateur).
+      DIRECT_DATABASE_URL: postgresql://${POSTGRES_ADMIN_USER}:${POSTGRES_ADMIN_PASSWORD}@postgres:5432/orya?schema=public
+      DATABASE_URL: postgresql://orya_app:${ORYA_APP_PASSWORD}@postgres:5432/orya?schema=public
+      ORYA_APP_PASSWORD: "${ORYA_APP_PASSWORD:?ORYA_APP_PASSWORD requis}"
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: "no"
+
+  api:
+    # B03 : valeur entre guillemets (le " : " du message cassait le YAML, L26.C69).
+    image: "orya-api:${ORYA_IMAGE_TAG:?ORYA_IMAGE_TAG requis : SHA du commit, voir scripts/build-images.ps1}"
+    build: { context: .., dockerfile: deploy/Dockerfile.api }
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      # Role applicatif SANS bypass RLS (jamais le super-utilisateur).
+      DATABASE_URL: postgresql://orya_app:${ORYA_APP_PASSWORD}@postgres:5432/orya?schema=public
+    volumes:
+      - storage:/var/lib/orya/storage
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    expose: ["3200"]
+
+  web:
+    # B03 : valeur entre guillemets (le " : " du message cassait le YAML, L26.C69).
+    image: "orya-web:${ORYA_IMAGE_TAG:?ORYA_IMAGE_TAG requis : SHA du commit, voir scripts/build-images.ps1}"
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+      args:
+        # Fige dans le bundle navigateur : reconstruire l'image pour chaque environnement.
+        NEXT_PUBLIC_API_BASE: "${PUBLIC_API_BASE:?PUBLIC_API_BASE requis}"
+    restart: unless-stopped
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    expose: ["3000"]
+
+volumes:
+  pgdata:
+  storage:

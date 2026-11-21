@@ -1,0 +1,14 @@
+# Dépendances et artefacts locaux de l'API
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Secrets locaux
+.env
+.env.*
+!.env.example
+
+# Divers
+coverage/
+*.log

@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AttendanceStatus {
+  present
+  absent
+  late
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  city      String
+  createdAt DateTime @default(now())
+
+  classes             Class[]
+  students            Student[]
+  attendanceRecords   AttendanceRecord[]
+}
+
+model Class {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  cycle     String
+  createdAt DateTime @default(now())
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  students          Student[]
+  attendanceRecords AttendanceRecord[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Student {
+  id        String   @id @default(cuid())
+  tenantId  String
+  classId   String
+  code      String
+  label     String
+  createdAt DateTime @default(now())
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  class             Class              @relation(fields: [classId], references: [id], onDelete: Cascade)
+  attendanceRecords AttendanceRecord[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, classId])
+}
+
+model AttendanceRecord {
+  id        String           @id @default(cuid())
+  tenantId  String
+  classId   String
+  studentId String
+  date      DateTime         @db.Date
+  status    AttendanceStatus
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  class   Class   @relation(fields: [classId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, studentId, date])
+  @@index([tenantId, classId, date])
+}

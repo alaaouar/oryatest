@@ -1,0 +1,8 @@
+@Controller("family/messages")
+export class FamilyMessagesController {
+  @Post(":id/ack")
+  ack() {}
+  @Post(":id/replies")
+  reply() {}
+}
+export const label = "ORYA n'est pas connecté à Massar : export compatible pour saisie manuelle.";

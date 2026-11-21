@@ -1,0 +1,96 @@
+# ORYA - EXEMPLE de composition de PRE-PRODUCTION (t62u B1). NE PAS lancer tel quel :
+# copier en docker-compose.preprod.yml sur le serveur de pre-production, remplir
+# deploy/.env.preprod a partir de deploy/env.preprod.example (jamais commite), placer un
+# reverse proxy TLS devant web et api. Runbook complet : docs/preproduction.md.
+# Differences avec la production (docker-compose.prod.example.yml) :
+#  - projet, base et volumes distincts (orya-preprod, orya_preprod) : AUCUNE donnee reelle ;
+#  - stockage des fichiers sur S3 (bucket de pre-production) au lieu du volume local ;
+#  - ClamAV interne (meme image que les tests) ;
+#  - journal des suppressions : fichier local sur volume dedie + copie WORM (Object Lock).
+# Images locales taguees avec le SHA du commit (scripts/build-images.ps1, jamais poussees).
+# Ordre : postgres (healthy) + clamav (healthy) -> migrate (succes) -> api (healthy) -> web.
+name: orya-preprod
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: orya_preprod
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:?POSTGRES_ADMIN_USER requis}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD requis}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_ADMIN_USER} -d orya_preprod"]
+      interval: 10s
+      retries: 10
+    # Pas de port publie : base accessible uniquement depuis le reseau interne.
+
+  clamav:
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    expose: ["3310"]
+
+  # Job ponctuel et idempotent : prisma migrate deploy + 000_roles.sql + 010_rls.sql.
+  migrate:
+    image: "orya-api-migrate:${ORYA_IMAGE_TAG:?ORYA_IMAGE_TAG requis : SHA du commit, voir scripts/build-images.ps1}"
+    build: { context: .., dockerfile: deploy/Dockerfile.api, target: migrate }
+    environment:
+      DIRECT_DATABASE_URL: postgresql://${POSTGRES_ADMIN_USER}:${POSTGRES_ADMIN_PASSWORD}@postgres:5432/orya_preprod?schema=public
+      DATABASE_URL: postgresql://orya_app:${ORYA_APP_PASSWORD}@postgres:5432/orya_preprod?schema=public
+      ORYA_APP_PASSWORD: ${ORYA_APP_PASSWORD:?ORYA_APP_PASSWORD requis}
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: "no"
+
+  api:
+    image: "orya-api:${ORYA_IMAGE_TAG:?ORYA_IMAGE_TAG requis : SHA du commit, voir scripts/build-images.ps1}"
+    build: { context: .., dockerfile: deploy/Dockerfile.api }
+    restart: unless-stopped
+    env_file: .env.preprod
+    environment:
+      # Role applicatif SANS bypass RLS (jamais le super-utilisateur).
+      DATABASE_URL: postgresql://orya_app:${ORYA_APP_PASSWORD}@postgres:5432/orya_preprod?schema=public
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+      DELETION_REGISTER_JOURNAL: /var/lib/orya/journal/deletion-register.jsonl
+    volumes:
+      # Copie locale du journal des suppressions (la copie qui fait foi est le bucket WORM).
+      - journal:/var/lib/orya/journal
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      clamav: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    expose: ["3200"]
+
+  web:
+    image: "orya-web:${ORYA_IMAGE_TAG:?ORYA_IMAGE_TAG requis : SHA du commit, voir scripts/build-images.ps1}"
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+      args:
+        # Fige dans le bundle navigateur : image web construite POUR la pre-production.
+        NEXT_PUBLIC_API_BASE: ${PUBLIC_API_BASE:?PUBLIC_API_BASE requis}
+    restart: unless-stopped
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    expose: ["3000"]
+
+volumes:
+  pgdata:
+  journal:

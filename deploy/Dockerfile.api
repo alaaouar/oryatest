@@ -1,0 +1,50 @@
+# ORYA API (NestJS) - image de production (préparation lot 10, non déployée).
+# Deux cibles :
+#   (défaut, dernière étape) runtime API : docker build -f deploy/Dockerfile.api -t orya-api .
+#   migrate (job ponctuel)  : docker build -f deploy/Dockerfile.api --target migrate -t orya-api-migrate .
+#     -> prisma migrate deploy + 000_roles.sql + 010_rls.sql (script compilé, sans tsx).
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ openssl && rm -rf /var/lib/apt/lists/*
+COPY apps/api/package.json apps/api/package-lock.json ./
+# Lot 10 : meme npm que le poste de dev (lockfile genere par npm 11 ; npm 10 le juge desynchronise).
+RUN npm install -g npm@11.19.1 && npm ci
+COPY apps/api/ ./
+RUN npx prisma generate && npm run build \
+  && npx tsc prisma/apply-sql.ts prisma/create-super-admin.ts --outDir build-migrate --module commonjs --target es2022 \
+     --esModuleInterop --skipLibCheck --types node
+
+# Dependances de production uniquement (pour le runtime).
+FROM build AS prod-deps
+RUN npm prune --omit=dev
+
+# Job de migration : prisma CLI (devDependency) + script compile + SQL. Image separee,
+# le runtime API n'embarque pas prisma CLI. P0-7 : seuls schema.prisma, migrations/ et les deux
+# SQL de structure (000_roles, 010_rls) sont copies ; ni seed.ts, ni apply-sql.ts, ni SQL de demo.
+FROM node:22-bookworm-slim AS migrate
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
+ENV NODE_ENV=production APPLY_ROLES=1
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/prisma/schema.prisma ./prisma/schema.prisma
+COPY --from=build /app/prisma/migrations ./prisma/migrations
+COPY --from=build /app/prisma/sql/000_roles.sql /app/prisma/sql/010_rls.sql ./migrate/sql/
+COPY --from=build /app/build-migrate/apply-sql.js /app/build-migrate/create-super-admin.js ./migrate/
+USER node
+CMD ["sh", "-c", "npx --no-install prisma migrate deploy && node migrate/apply-sql.js"]
+
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/* \
+  && groupadd -r orya && useradd -r -g orya orya && mkdir -p /var/lib/orya/storage && chown orya:orya /var/lib/orya/storage
+ENV NODE_ENV=production API_PORT=3200 STORAGE_DRIVER=local STORAGE_LOCAL_DIR=/var/lib/orya/storage
+COPY --from=prod-deps --chown=orya:orya /app/node_modules ./node_modules
+COPY --from=build --chown=orya:orya /app/dist ./dist
+# P0-7 : le runtime n'a besoin que du schema (client Prisma deja genere dans node_modules).
+COPY --from=build --chown=orya:orya /app/prisma/schema.prisma ./prisma/schema.prisma
+COPY --from=build --chown=orya:orya /app/package.json ./package.json
+USER orya
+EXPOSE 3200
+HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:3200/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "dist/main.js"]

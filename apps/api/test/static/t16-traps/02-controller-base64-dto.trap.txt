@@ -1,0 +1,18 @@
+import { Body, Controller, Post } from "@nestjs/common";
+export class TrapTwoDto {
+  filename!: string;
+  contentBase64!: string;
+}
+@Controller("trap-two")
+export class TrapTwoController {
+  constructor(private readonly trapTwo: TrapTwoService) {}
+  @Post()
+  up(@Body() dto: TrapTwoDto) {
+    return this.trapTwo.decodeTrapTwo(dto);
+  }
+}
+export class TrapTwoService {
+  async decodeTrapTwo(dto: TrapTwoDto) {
+    return Buffer.from(dto.contentBase64, "base64").length;
+  }
+}

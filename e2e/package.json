@@ -1,0 +1,14 @@
+{
+  "name": "@orya/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tests E2E navigateur ORYA (Playwright) contre la pile locale jetable.",
+  "scripts": {
+    "test": "playwright test",
+    "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File ./run-e2e.ps1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "otplib": "12.0.1"
+  }
+}

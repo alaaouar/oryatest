@@ -1,0 +1,19 @@
+import { Controller, Post, UploadedFile, UseInterceptors } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+@Controller("witness")
+export class WitnessController {
+  constructor(private readonly witness: WitnessService) {}
+  @Post()
+  @UseInterceptors(FileInterceptor("file"))
+  up(@UploadedFile() file: any) {
+    return this.witness.acceptWitness(file);
+  }
+}
+export class WitnessService {
+  constructor(private readonly storage: any) {}
+  async acceptWitness(file: any) {
+    const r = await this.storage.intake(file.originalname, file.buffer);
+    if ("infected" in r) throw new Error("x");
+    return this.storage.store("s", r.upload, r.scan);
+  }
+}

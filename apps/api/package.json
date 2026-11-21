@@ -1,0 +1,60 @@
+{
+  "name": "@orya/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API ORYA — NestJS, versionnée /api/v1",
+  "scripts": {
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:dev": "nest start --watch",
+    "prisma:generate": "prisma generate",
+    "db:migrate:create": "prisma migrate dev --create-only",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:rls": "tsx --env-file=.env prisma/apply-sql.ts",
+    "db:seed": "tsx --env-file=.env prisma/seed.ts",
+    "admin:create-super-admin": "tsx --env-file-if-exists=.env prisma/create-super-admin.ts",
+    "db:seed:demo": "node -e \"console.error('db:seed:demo desactive : cible historique interdite (orya-postgres / orya_v2). Reecriture prevue apres P0-2.');process.exit(1)\"",
+    "test": "npm run test:static",
+    "test:unit": "vitest run",
+    "test:static": "node test/static/check-tenancy.mjs && node test/static/check-user-select.mjs && node test/static/check-encoding.mjs && node test/static/check-system-contexts.mjs && node test/static/check-upload-pipeline.mjs && node test/static/check-scope.mjs",
+    "test:db": "powershell -NoProfile -ExecutionPolicy Bypass -File ./test/db/run-db-tests.ps1",
+    "test:api": "powershell -NoProfile -ExecutionPolicy Bypass -File ./test/api/run-api-tests.ps1"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "overrides": {
+    "multer": "^2.5.0",
+    "uuid": "^11.1.1"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1163.0",
+    "@aws-sdk/s3-request-presigner": "3.1163.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/platform-express": "^11.2.8",
+    "@nestjs/throttler": "^6.0.0",
+    "@prisma/client": "^6.19.3",
+    "argon2": "^0.44.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "csv-parse": "7.0.3",
+    "exceljs": "4.4.0",
+    "helmet": "^8.0.0",
+    "otplib": "^12.0.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "prisma": "^6.19.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.7"
+  }
+}

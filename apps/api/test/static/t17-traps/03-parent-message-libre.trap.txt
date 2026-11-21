@@ -1,0 +1,5 @@
+@Controller("family/messages")
+export class FamilyMessagesController {
+  @Post()
+  send() {}
+}

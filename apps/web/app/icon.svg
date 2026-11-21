@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" fill="none">
+  <!-- Graduation Cap -->
+  <path d="M126 36 L176 58 L126 80 L76 58 Z" stroke="#153E7E" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M92 67 V84 C92 94 160 94 160 84 V67" stroke="#153E7E" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+  
+  <!-- Cap Tassel -->
+  <path d="M126 58 L92 73 V108" stroke="#153E7E" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="126" cy="58" r="7" fill="#188C54" />
+
+  <!-- Open Book (Left Pages & Spine) -->
+  <path d="M72 96 C94 96 112 106 120 120 V198 C108 182 88 176 72 176 Z" stroke="#153E7E" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M58 110 V190 C82 190 104 196 120 208" stroke="#153E7E" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Right Stem & Leaf -->
+  <path d="M120 198 C120 156 140 120 176 112" stroke="#153E7E" stroke-width="8" stroke-linecap="round" />
+  <path d="M132 154 C132 134 150 124 168 126 C168 144 152 156 132 154 Z" fill="#188C54" />
+</svg>

@@ -1,0 +1,18 @@
+node_modules/
+report/
+test-results/
+
+guide-captures/
+run-guide.ps1
+
+# Sorties generees (etape 1.3)
+preprod-out/
+guide/**/*.png
+guide/**/*.jpg
+guide/**/*.pdf
+guide/**/*.zip
+guide/**/*.csv
+guide/**/*.xlsx
+guide/**/*.log
+guide/**/manifest*.json
+guide/**/out/

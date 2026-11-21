@@ -1,0 +1,1 @@
+{ "name": "x", "dependencies": { "@anthropic-ai/sdk": "1.0.0", "socket.io": "4.0.0" } }

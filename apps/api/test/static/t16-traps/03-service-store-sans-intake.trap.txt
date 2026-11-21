@@ -1,0 +1,6 @@
+export class TrapThreeService {
+  constructor(private readonly storage: any) {}
+  async writeTrapThree(schoolId: string, upload: any) {
+    return this.storage.store(schoolId, upload, { status: "clean", engine: "none" });
+  }
+}

@@ -1,0 +1,1587 @@
+// ORYA — API — modèle de données du Lot 1 « Fondations »
+// Référence : CDC v2.0 §3, §4 M1, §8 S-1, §12
+//
+// Règles de ce schéma :
+//  - chaque table métier porte un schoolId (isolation) ;
+//  - les identifiants sont générés par PostgreSQL (gen_random_uuid()) ;
+//  - les secrets (passwordHash, mfaSecret) ne quittent jamais la couche service ;
+//  - le Row Level Security est appliqué hors Prisma : voir prisma/sql/010_rls.sql.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")        // rôle orya_app, soumis au RLS
+  directUrl = env("DIRECT_DATABASE_URL") // rôle orya_owner, migrations et seed
+}
+
+// ---------------------------------------------------------------------------
+// Énumérations
+// ---------------------------------------------------------------------------
+
+enum SchoolStatus {
+  pending // créée par le super-admin, en attente de vérification
+  active
+  suspended
+}
+
+enum UserStatus {
+  pending // compte créé, accès non encore activé
+  active
+  disabled
+  deleted // suppression logique avant anonymisation
+}
+
+enum ProfileRole {
+  direction
+  super_admin
+  parent
+  teacher
+  student
+  bus_attendant
+  chauffeur
+}
+
+enum DeviceStatus {
+  active
+  revoked
+}
+
+enum ConsentScope {
+  terms
+  privacy
+  transport_alerts
+}
+
+/// Finalite du consentement parental (CDC §9 + Avenant n1).
+enum ConsentPurpose {
+  student_account
+  transport_alerts
+}
+
+/// Brouillon : refuse pour tout compte reel jusqu'a validation juridique.
+enum ConsentTextStatus {
+  draft
+  validated
+}
+
+enum ConsentChannel {
+  web
+  mobile
+  paper_school
+}
+
+/// Statut du compte eleve ORYA (distinct du dossier scolaire conserve par l'ecole).
+enum StudentAccountStatus {
+  none
+  active
+  suspended_no_consent
+}
+
+enum AccountDeletionKind {
+  self
+  student_by_guardian
+  student_by_school
+}
+
+enum AccountDeletionStatus {
+  pending
+  cancelled
+  completed
+}
+
+enum AuditSeverity {
+  info
+  warning
+  critical
+}
+
+// ---------------------------------------------------------------------------
+// Établissement
+// ---------------------------------------------------------------------------
+
+model School {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  city      String
+  ice       String?      @unique // identifiant commun de l'entreprise, optionnel au départ
+  code      String       @unique @db.VarChar(6) // code etablissement communique aux familles
+  status    SchoolStatus @default(pending)
+  timezone  String       @default("Africa/Casablanca")
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  profiles         UserProfile[]
+  devices          Device[]
+  invitations      Invitation[]
+  students         Student[]
+  guardians        Guardian[]
+  studentGuardians StudentGuardian[]
+  consents         Consent[]
+  parentalConsents ParentalConsent[]
+  auditLogs        AuditLog[]
+  deletionRequests AccountDeletionRequest[]
+  subscription     Subscription?
+  classrooms                    Classroom[]
+  enrollments                   Enrollment[]
+  importJobs                    ImportJob[]
+  importRowErrors               ImportRowError[]
+  teacherClassroomAssignments   TeacherClassroomAssignment[]
+  attendanceSessions            AttendanceSession[]
+  attendanceRows                AttendanceRow[]
+
+  storedFiles           StoredFile[]
+  absenceJustifications AbsenceJustification[]
+  notifications         Notification[]
+  parentActions         ParentAction[]
+  messages          Message[]
+  messageRecipients MessageRecipient[]
+  messageReplies    MessageReply[]
+  agendaItems       AgendaItem[]
+  agendaAttachments AgendaAttachment[]
+  massarExports     MassarExport[]
+  invoices          Invoice[]
+  /// t92 M2 : calendrier scolaire.
+  calendar          SchoolCalendar?
+  holidays          SchoolHoliday[]
+  assessments       Assessment[]
+  assessmentResults AssessmentResult[]
+  usageSnapshots    UsageSnapshot[]
+  @@index([status])
+  busStatuses        StudentBusStatus[]
+  busCircuits        BusCircuit[]
+  busStops           BusStop[]
+  busCircuitStudents BusCircuitStudent[]
+  dataExports        DataExportRequest[]
+  dataRightsRequests DataRightsRequest[]
+  schoolContract     SchoolContract?
+  schoolInvoices     SchoolInvoice[]
+  schoolPayments     SchoolPayment[]
+  transportTrackingEnabled      Boolean @default(true)
+  latitude                      Float?
+  longitude                     Float?
+  busVehicles                   BusVehicle[]
+  busTrips                      BusTrip[]
+  busTripPositions              BusTripPosition[]
+  busTripStopEvents             BusTripStopEvent[]
+  transportNotificationLogs     TransportNotificationLog[]
+}
+
+// ---------------------------------------------------------------------------
+// Identité
+// ---------------------------------------------------------------------------
+
+/// ATTENTION : cette table ne porte pas de RLS (voir ADR-002).
+/// Elle n'est lue que par trois méthodes nommées du service d'authentification.
+model User {
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email            String     @unique
+  passwordHash     String // Argon2id
+  locale           String     @default("fr") // "fr" | "ar"
+  status           UserStatus @default(pending)
+  mfaSecret        String? // chiffré applicativement, jamais en clair
+  mfaEnrolledAt    DateTime?
+  /// Dernier pas de temps TOTP accepté (30 s) : empêche le rejeu d'un même code.
+  mfaLastStep      Int?
+  failedLoginCount Int        @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  activeProfileId  String?    @db.Uuid
+  /// Renseigne apres anonymisation (J1.2).
+  deletedAt        DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  activeProfile UserProfile? @relation("ActiveProfile", fields: [activeProfileId], references: [id], onDelete: SetNull)
+  profiles      UserProfile[] @relation("UserProfiles")
+  devices       Device[]
+  consents      Consent[]
+  parentalConsents ParentalConsent[] @relation("ParentalConsentUser")
+  parentalConsentRevocations ParentalConsent[] @relation("ParentalConsentRevoker")
+  invitations   Invitation[]
+  guardians     Guardian[]
+  auditLogs     AuditLog[]   @relation("Actor")
+  deletionRequests AccountDeletionRequest[] @relation("DeletionTarget")
+  deletionRequested AccountDeletionRequest[] @relation("DeletionRequester")
+  importJobs    ImportJob[]
+
+  notifications Notification[]
+  messageRecipients MessageRecipient[]
+  dataExports        DataExportRequest[] @relation("DataExports")
+  dataRightsRequests DataRightsRequest[] @relation("DataRightsRequests")
+  passwordResetTokens PasswordResetToken[]
+  @@index([status])
+}
+
+/// F01 (t87u) : jeton de reinitialisation du mot de passe, usage unique, SHA-256 seulement.
+/// RLS : visible uniquement dans le contexte d'identite du compte (app.user_id).
+model PasswordResetToken {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+/// Un profil = un rôle dans une école. Un compte peut en porter plusieurs (CDC §3.3).
+/// schoolId est nul uniquement pour le super-admin ORYA.
+model UserProfile {
+  id          String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String      @db.Uuid
+  schoolId    String?     @db.Uuid
+  role        ProfileRole
+  displayName String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  user          User    @relation("UserProfiles", fields: [userId], references: [id], onDelete: Cascade)
+  school        School? @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  activeForUser User[]  @relation("ActiveProfile")
+  devices       Device[]
+  classroomAssignments TeacherClassroomAssignment[]
+  /// t92 (CDC 3.2 / 3.5 / 5) : circuits confiés à un profil accompagnateur.
+  busCircuits          BusCircuit[]
+  driverTrips          BusTrip[]                   @relation("DriverTrips")
+  /// Bloc 4 : profil eleve rattache a sa fiche Student (consultation seule, consentement actif requis).
+  studentId   String?     @unique @db.Uuid
+  student     Student?    @relation("StudentProfile", fields: [studentId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, schoolId, role])
+  @@index([userId])
+  @@index([schoolId, role])
+}
+
+/// Appareil connecté : permet la révocation et la liste des sessions (CDC §3.4).
+model Device {
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String       @db.Uuid
+  schoolId         String?      @db.Uuid
+  activeProfileId  String?      @db.Uuid
+  platform         String? // "android" | "ios" | "web"
+  refreshTokenHash String       @unique
+  status           DeviceStatus @default(active)
+  lastSeenAt       DateTime?
+  createdAt        DateTime     @default(now())
+  revokedAt        DateTime?
+
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school        School?      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  activeProfile UserProfile? @relation(fields: [activeProfileId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+}
+
+/// Invitation nominative : enseignant, accompagnateur (CDC §3.2).
+/// Le jeton est stocké haché, jamais en clair.
+model Invitation {
+  id          String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String      @db.Uuid
+  role        ProfileRole
+  email       String?
+  tokenHash   String      @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdById String?     @db.Uuid
+  studentId   String?     @db.Uuid
+  guardianId  String?     @db.Uuid
+  createdAt   DateTime    @default(now())
+
+  school    School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  student   Student?  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  guardian  Guardian? @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, role])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Élèves et responsables
+// ---------------------------------------------------------------------------
+
+/// Élève. studentCode est un identifiant lisible (Massar, listes), PAS un secret.
+/// L'activation d'un parent utilise activationCodeHash : code long, aléatoire et
+/// expirant, émis par l'école et stocké uniquement sous forme de hash.
+model Student {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String    @db.Uuid
+  studentCode String
+  /// Code Massar (identifiant national) : conservé tel quel, jamais réécrit.
+  massarCode  String?
+  displayName String
+  birthDate   DateTime? @db.Date
+
+  /// SHA-256 du code d'activation remis à la famille (jamais stocké en clair).
+  activationCodeHash      String?   @unique
+  activationCodeIssuedAt  DateTime?
+  activationCodeExpiresAt DateTime?
+
+  /// Compte eleve ORYA : actif seulement avec consentement parental valide.
+  accountStatus StudentAccountStatus @default(none)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  school          School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  guardians       StudentGuardian[]
+  assessmentResults AssessmentResult[]
+  parentalConsents ParentalConsent[]
+  deletionRequests AccountDeletionRequest[]
+  invitations     Invitation[]
+  enrollments     Enrollment[]
+  attendanceRows  AttendanceRow[]
+
+  absenceJustifications AbsenceJustification[]
+  parentActions         ParentAction[]
+  messages Message[]
+  studentProfile UserProfile? @relation("StudentProfile")
+  busStatuses    StudentBusStatus[]
+  busCircuitLink BusCircuitStudent?
+  transportNotificationLogs TransportNotificationLog[]
+  @@unique([schoolId, studentCode])
+  @@index([schoolId])
+  @@index([activationCodeExpiresAt])
+    @@index([schoolId, accountStatus])
+@@unique([schoolId, massarCode])
+}
+
+/// Responsable légal. Peut exister avant la création du compte (userId nul).
+model Guardian {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId  String   @db.Uuid
+  userId    String?  @db.Uuid
+  fullName  String
+  email     String?
+  phone     String?
+  /// Lot 3 : coordonnées complémentaires de la famille.
+  phoneSecondary String?
+  address        String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  school      School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user        User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  students    StudentGuardian[]
+  invitations Invitation[]
+  parentalConsents ParentalConsent[]
+
+  @@index([schoolId])
+  @@index([userId])
+  @@index([schoolId, email])
+  @@index([schoolId, phone])
+}
+
+/// Lien élève ↔ responsable. Un maximum de 2 responsables par élève est imposé
+/// par le trigger orya_enforce_max_guardians (voir 010_rls.sql).
+model StudentGuardian {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String   @db.Uuid
+  studentId    String   @db.Uuid
+  guardianId   String   @db.Uuid
+  relationship String? // "père", "mère", "tuteur"…
+  isPrimary    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  school   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student  Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  guardian Guardian @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, guardianId])
+  @@index([schoolId])
+  @@index([guardianId])
+}
+
+// ---------------------------------------------------------------------------
+// Conformité et traçabilité
+// ---------------------------------------------------------------------------
+
+/// Consentement versionné (CDC §9 : version, date, consentement parental).
+model Consent {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String       @db.Uuid
+  schoolId  String?      @db.Uuid
+  scope     ConsentScope
+  version   String
+  grantedAt DateTime     @default(now())
+  revokedAt DateTime?
+  ip        String?
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school School? @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope, version])
+  @@index([schoolId])
+}
+
+/// Texte de consentement versionne (FR/AR). Immuable (trigger). Un texte
+/// `draft` (brouillon) est refuse pour tout compte reel tant qu'il n'est pas `validated`.
+model ConsentText {
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  purpose     ConsentPurpose
+  version     String
+  locale      String // "fr" | "ar"
+  body        String
+  bodySha256  String
+  status      ConsentTextStatus @default(draft)
+  effectiveAt DateTime?
+  retiredAt   DateTime?
+  createdAt   DateTime          @default(now())
+  /// Validation juridique (bloc 3, point 4) : reference du document et date, obligatoires si status=validated (CHECK SQL).
+  legalDocumentRef String?
+  legalValidatedAt DateTime? @db.Date
+  validatedById    String?   @db.Uuid
+
+  consents ParentalConsent[]
+
+  @@unique([purpose, version, locale])
+  @@index([purpose, status])
+}
+
+/// Consentement parental (CDC §9 + Avenant n1). Table dediee : `Consent` reste
+/// reserve aux CGU / confidentialite. Trace : responsable, eleve, finalite,
+/// version (via textId), horodatage, canal. Le retrait renseigne revokedAt.
+model ParentalConsent {
+  id                 String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId           String         @db.Uuid
+  studentId          String         @db.Uuid
+  guardianId         String?        @db.Uuid
+  userId             String?        @db.Uuid
+  purpose            ConsentPurpose @default(student_account)
+  textId             String         @db.Uuid
+  channel            ConsentChannel
+  /// Canal papier (direction) : nom du responsable, date, reference dossier (pas de piece jointe tant que S3/antivirus absents).
+  guardianName       String?
+  paperDate          DateTime?      @db.Date
+  paperFileReference String?
+  /// Bloc 3 : scan du formulaire papier (StoredFile, meme pipeline que les justificatifs).
+  paperFileId        String?        @unique @db.Uuid
+  grantedAt          DateTime       @default(now())
+  revokedAt          DateTime?
+  revokedById        String?        @db.Uuid
+  ip                 String?
+  userAgent          String?
+
+  school    School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student   Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  guardian  Guardian? @relation(fields: [guardianId], references: [id], onDelete: SetNull)
+  user      User?     @relation("ParentalConsentUser", fields: [userId], references: [id], onDelete: SetNull)
+  text      ConsentText @relation(fields: [textId], references: [id], onDelete: Restrict)
+  revokedBy User?     @relation("ParentalConsentRevoker", fields: [revokedById], references: [id], onDelete: SetNull)
+  paperFile StoredFile? @relation("PaperConsentScan", fields: [paperFileId], references: [id], onDelete: Restrict)
+
+  @@index([schoolId, studentId])
+  @@index([guardianId])
+  @@index([textId])
+}
+
+model AccountDeletionRequest {
+  id            String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String?               @db.Uuid
+  studentId     String?               @db.Uuid
+  schoolId      String?               @db.Uuid
+  kind          AccountDeletionKind
+  status        AccountDeletionStatus @default(pending)
+  requestedById String?               @db.Uuid
+  requestedAt   DateTime              @default(now())
+  effectiveAt   DateTime
+  cancelledAt   DateTime?
+  completedAt   DateTime?
+  requestIp     String?
+
+  user        User?    @relation("DeletionTarget", fields: [userId], references: [id], onDelete: SetNull)
+  student     Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+  school      School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  requestedBy User?    @relation("DeletionRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+
+  @@index([status, effectiveAt])
+  @@index([userId])
+  @@index([studentId])
+}
+
+/// Registre d'empreintes a rejouer apres restauration de sauvegarde (J1.2).
+model DeletionRegister {
+  id              String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  emailHash       String              @unique
+  userIdHash      String
+  studentIdHash   String?
+  schoolIdHash    String?
+  kind            AccountDeletionKind
+  anonymizedAt    DateTime            @default(now())
+  sourceRequestId String?             @db.Uuid
+
+  @@index([userIdHash])
+}
+
+/// Journal d'audit append-only (CDC §8 S-5). Toute modification ou suppression
+/// est bloquée par le trigger orya_audit_immutable (voir 010_rls.sql).
+model AuditLog {
+  id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorId   String?       @db.Uuid
+  schoolId  String?       @db.Uuid
+  action    String // ex. "school.activate", "attendance.close", "support.access"
+  entity    String // nom de l'entité concernée
+  entityId  String?
+  severity  AuditSeverity @default(info)
+  metadata  Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime      @default(now())
+
+  actor  User?   @relation("Actor", fields: [actorId], references: [id], onDelete: SetNull)
+  school School? @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Abonnement (CDC §7) — schéma posé dès le Lot 1, facturation au Lot 6.
+// Tous les établissements sont en essai jusque-là.
+// ---------------------------------------------------------------------------
+
+enum SubscriptionStatus {
+  trial
+  active
+  past_due
+  expired
+  exempt
+  /// Lot 9
+  suspended
+  cancelled
+}
+
+model Subscription {
+  id               String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId         String             @unique @db.Uuid
+  status           SubscriptionStatus @default(trial)
+  plan             String             @default("standard")
+  pricePerChildMad Int                @default(120) // 120 DH TTC, paramétrable par ORYA
+  currency         String             @default("MAD")
+  trialEndsAt      DateTime?
+  currentPeriodEnd DateTime?
+  /// Lot 9 : plan configurable (limites), statut daté.
+  planId           String?            @db.Uuid
+  statusChangedAt  DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  planRef Plan? @relation(fields: [planId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Lot 2.1 — structure scolaire et import Excel/CSV
+// ---------------------------------------------------------------------------
+
+/// Classe d'un établissement. Le nom est unique dans l'école.
+model Classroom {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId  String   @db.Uuid
+  name      String
+  cycle     String? // "Primaire" | "Collège" | "Lycée"
+  level     String? // niveau libre : "6e", "Tronc commun"…
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  school       School                       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  enrollments  Enrollment[]
+  assignments  TeacherClassroomAssignment[]
+  sessions     AttendanceSession[]
+  assessments  Assessment[]
+
+  messages Message[]
+  agendaItems AgendaItem[]
+  @@unique([schoolId, name])
+  @@index([schoolId])
+}
+
+/// Inscription d'un élève dans une classe pour une année scolaire donnée.
+model Enrollment {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String   @db.Uuid
+  studentId   String   @db.Uuid
+  classroomId String   @db.Uuid
+  schoolYear  String // "2026-2027"
+  /// Bloc 5 : debut / fin de scolarite dans l'annee (null = toute l'annee). Sert au comptage facture.
+  startsOn    DateTime? @db.Date
+  endsOn      DateTime? @db.Date
+  createdAt   DateTime @default(now())
+
+  school    School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student   Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classroom Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, schoolYear])
+  @@index([schoolId, classroomId])
+  /// Lot 7 : effectifs par année (tableau de bord).
+  @@index([schoolId, schoolYear, classroomId])
+}
+
+enum ImportStatus {
+  preview
+  committed
+  cancelled
+}
+
+/// Import en deux temps : aperçu (preview) puis validation (commit).
+/// Les lignes normalisées sont conservées dans le job : le fichier n'est relu
+/// ni pour l'aperçu ni pour le commit.
+model ImportJob {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId       String       @db.Uuid
+  createdById    String?      @db.Uuid
+  filename       String
+  /// Lot 3 : "students" (élèves) ou "guardians" (responsables, 2.1b).
+  kind           String       @default("students")
+  status         ImportStatus @default(preview)
+  schoolYear     String
+  totalRows      Int          @default(0)
+  validRows      Int          @default(0)
+  invalidRows    Int          @default(0)
+  normalizedRows Json?
+  committedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  school    School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdBy User?            @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  errors    ImportRowError[]
+
+  @@index([schoolId, createdAt])
+}
+
+/// Erreur de validation d'une ligne d'import, affichée telle quelle à l'école.
+model ImportRowError {
+  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId String  @db.Uuid
+  jobId    String  @db.Uuid
+  line     Int
+  column   String?
+  message  String
+
+  school School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  job    ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+}
+
+// ---------------------------------------------------------------------------
+// Lot 2.2 — affectations enseignant-classe et appels / présences
+// ---------------------------------------------------------------------------
+
+enum AttendanceSlot {
+  morning
+  afternoon
+}
+
+enum AttendanceSessionStatus {
+  open
+  closed
+}
+
+enum AttendanceStatus {
+  present
+  absent
+  late
+}
+
+/// Affectation d'un profil enseignant à une classe pour une année scolaire.
+/// Obligatoire avant toute ouverture d'appel par un enseignant.
+model TeacherClassroomAssignment {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId         String   @db.Uuid
+  teacherProfileId String   @db.Uuid
+  classroomId      String   @db.Uuid
+  schoolYear       String // "2026-2027"
+  createdById      String?  @db.Uuid
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  school         School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  teacherProfile UserProfile @relation(fields: [teacherProfileId], references: [id], onDelete: Cascade)
+  classroom      Classroom   @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+
+  @@unique([schoolId, teacherProfileId, classroomId, schoolYear], map: "TeacherAssignment_school_teacher_class_year_key") // t52u : nom reel de l'index (migration lot2_2), aucune derive
+  @@index([schoolId, classroomId])
+  @@index([schoolId, teacherProfileId])
+}
+
+/// Session d'appel : une classe, une date, une demi-journée.
+model AttendanceSession {
+  id           String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String                   @db.Uuid
+  classroomId  String                   @db.Uuid
+  /// Date civile (UTC date-only).
+  date         DateTime                 @db.Date
+  slot         AttendanceSlot
+  status       AttendanceSessionStatus  @default(open)
+  schoolYear   String
+  openedById   String?                  @db.Uuid
+  closedAt     DateTime?
+  closedById   String?                  @db.Uuid
+  reopenedAt   DateTime?
+  reopenedById String?                  @db.Uuid
+  reopenReason String?
+  /// Compteur monotone : prépare les conflits hors ligne (Lot ultérieur).
+  version      Int                      @default(1)
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+
+  school    School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroom Classroom       @relation(fields: [classroomId], references: [id], onDelete: Restrict)
+  rows      AttendanceRow[]
+
+  @@unique([schoolId, classroomId, date, slot])
+  @@index([schoolId, date])
+  @@index([schoolId, classroomId])
+}
+
+/// Ligne de présence d'un élève dans une session.
+model AttendanceRow {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId         String           @db.Uuid
+  sessionId        String           @db.Uuid
+  studentId        String           @db.Uuid
+  status           AttendanceStatus
+  recordedAt       DateTime         @default(now())
+  recordedById     String?          @db.Uuid
+  version          Int              @default(1)
+  /// Réservé au Lot hors ligne : UUID client pour déduplication (nullable).
+  clientMutationId String?          @db.Uuid
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  school  School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  session AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  student Student           @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, studentId])
+  @@unique([clientMutationId])
+  @@index([schoolId, sessionId])
+  @@index([schoolId, studentId])
+}
+// --- Lot 4 : espace parents ------------------------------------------------
+
+enum JustificationStatus {
+  pending
+  accepted
+  rejected
+  /// t92 M4 : « à compléter » (la direction demande un complément à la famille).
+  incomplete
+}
+
+enum ParentActionStatus {
+  open
+  done
+  cancelled
+}
+
+/// Fichier privé (justificatif…). Le contenu vit dans le stockage privé ;
+/// la base ne garde qu'une clé aléatoire, jamais d'URL publique.
+model StoredFile {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String   @db.Uuid
+  driver       String
+  storageKey   String   @unique
+  mimeType     String
+  sizeBytes    Int
+  sha256       String
+  originalName String
+  createdById  String?  @db.Uuid
+  createdAt    DateTime @default(now())
+  /// Bloc 3 : antivirus (telechargeable seulement si clean), chiffrement, finalite, conservation.
+  scanStatus     FileScanStatus @default(pending)
+  scannedAt      DateTime?
+  scanEngine     String?
+  encryption     String         @default("none")
+  purpose        String         @default("legacy")
+  retentionUntil DateTime?
+  purgedAt       DateTime?
+
+  school         School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  justifications AbsenceJustification[]
+
+  agendaAttachment AgendaAttachment?
+  paperConsent     ParentalConsent?       @relation("PaperConsentScan")
+  @@index([schoolId])
+  @@index([retentionUntil])
+  exportJson DataExportRequest? @relation("ExportJson")
+  exportPdf  DataExportRequest? @relation("ExportPdf")
+}
+
+enum FileScanStatus {
+  pending
+  clean
+  infected
+  error
+}
+
+/// Justificatif d'absence ou de retard déposé par un parent, examiné par l'école.
+model AbsenceJustification {
+  id            String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId      String              @db.Uuid
+  studentId     String              @db.Uuid
+  fromDate      DateTime            @db.Date
+  toDate        DateTime            @db.Date
+  reason        String
+  fileId        String?             @db.Uuid
+  status        JustificationStatus @default(pending)
+  submittedById String              @db.Uuid
+  reviewedById  String?             @db.Uuid
+  reviewedAt    DateTime?
+  reviewNote    String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  school  School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student Student     @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  file    StoredFile? @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  /// t92 M4 : carte « À faire » ouverte quand le justificatif est « à compléter ».
+  actions ParentAction[]
+
+  @@index([schoolId, status])
+  @@index([schoolId, studentId])
+}
+
+/// Notification in-app (lot 4 : socle ; e-mail au lot 5).
+model Notification {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId  String    @db.Uuid
+  userId    String    @db.Uuid
+  kind      String
+  title     String
+  body      String?
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, userId, readAt])
+}
+
+/// Action demandée par l'école aux responsables d'un élève.
+model ParentAction {
+  id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId      String             @db.Uuid
+  studentId     String             @db.Uuid
+  title         String
+  description   String?
+  dueDate       DateTime?          @db.Date
+  status        ParentActionStatus @default(open)
+  createdById   String?            @db.Uuid
+  completedById String?            @db.Uuid
+  completedAt   DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  /// t92 M4 : justificatif « à compléter » auquel la carte se rapporte (fermée à la complétion).
+  justificationId String?          @db.Uuid
+
+  school        School                @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student       Student               @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  justification AbsenceJustification? @relation(fields: [justificationId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, studentId, status])
+  /// Lot 7 : actions en attente par école.
+  @@index([schoolId, status])
+  @@index([justificationId])
+}
+
+// --- Lot 5 : communication école-famille (in-app) --------------------------
+
+enum MessageKind {
+  announcement
+  event
+  class_message
+  direct
+}
+
+enum MessageAudience {
+  school
+  classroom
+  student
+  /// t92 M5 : toutes les classes d'un niveau (Classroom.level).
+  level
+  /// t92 M5 : sélection explicite d'élèves (Message.targetStudentIds).
+  selection
+}
+
+/// Message de l'école : annonce, événement, message de classe ou individuel.
+model Message {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId      String          @db.Uuid
+  kind          MessageKind
+  audience      MessageAudience
+  classroomId   String?         @db.Uuid
+  studentId     String?         @db.Uuid
+  title         String
+  body          String
+  important     Boolean         @default(false)
+  requiresAck   Boolean         @default(false)
+  eventAt       DateTime?
+  eventLocation String?
+  authorId      String          @db.Uuid
+  authorRole    String
+  createdAt     DateTime        @default(now())
+  /// t92 M5 : niveau visé (audience = level).
+  level            String?
+  /// t92 M5 : élèves visés (audience = selection), 200 au plus.
+  targetStudentIds String[]       @default([]) @db.Uuid
+
+  school     School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroom  Classroom?         @relation(fields: [classroomId], references: [id], onDelete: Restrict)
+  student    Student?           @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  recipients MessageRecipient[]
+  replies    MessageReply[]
+
+  @@index([schoolId, createdAt])
+  @@index([schoolId, authorId])
+}
+
+/// Destinataire (compte parent) : lecture et accusé de réception.
+model MessageRecipient {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId       String    @db.Uuid
+  messageId      String    @db.Uuid
+  userId         String    @db.Uuid
+  studentId      String?   @db.Uuid
+  readAt         DateTime?
+  acknowledgedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([schoolId, userId])
+}
+
+/// Réponse dans un échange individuel (historique des échanges).
+model MessageReply {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId   String   @db.Uuid
+  messageId  String   @db.Uuid
+  authorId   String   @db.Uuid
+  authorRole String
+  body       String
+  createdAt  DateTime @default(now())
+
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, messageId])
+}
+
+// --- Lot 6 : agenda et devoirs ---------------------------------------------
+
+enum AgendaKind {
+  homework
+  test
+  class_event
+  important_date
+}
+
+/// Entrée d'agenda : devoir, contrôle, événement de classe ou date importante.
+/// classroomId nul = date importante pour toute l'école (direction).
+/// Les événements d'école publiés au lot 5 (Message kind=event) ne sont pas dupliqués.
+model AgendaItem {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String     @db.Uuid
+  classroomId String?    @db.Uuid
+  kind        AgendaKind
+  title       String
+  description String?
+  date        DateTime   @db.Date
+  schoolYear  String
+  authorId    String     @db.Uuid
+  authorRole  String
+  cancelledAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  school      School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroom   Classroom?         @relation(fields: [classroomId], references: [id], onDelete: Restrict)
+  attachments AgendaAttachment[]
+
+  @@index([schoolId, classroomId, date])
+  @@index([schoolId, date])
+  /// Lot 7 : activité par auteur.
+  @@index([schoolId, authorId, createdAt])
+}
+
+/// Pièce jointe privée d'une entrée d'agenda (StorageService, lot 4).
+model AgendaAttachment {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String   @db.Uuid
+  agendaItemId String   @db.Uuid
+  fileId       String   @unique @db.Uuid
+  createdAt    DateTime @default(now())
+
+  school School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  item   AgendaItem @relation(fields: [agendaItemId], references: [id], onDelete: Cascade)
+  file   StoredFile @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@index([schoolId, agendaItemId])
+}
+
+/// Lot 8 : historique des exports « format ORYA compatible pour saisie Massar ».
+/// Seules les métadonnées et l'empreinte SHA-256 du fichier sont conservées
+/// (aucune copie des données personnelles exportées).
+model MassarExport {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String    @db.Uuid
+  report       String
+  format       String
+  schoolYear   String
+  fromDate     DateTime? @db.Date
+  toDate       DateTime? @db.Date
+  rowCount     Int
+  anomalyCount Int
+  sha256       String
+  filename     String
+  columnsVersion String
+  createdById  String?   @db.Uuid
+  createdAt    DateTime  @default(now())
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, createdAt])
+}
+
+/// Lot 9 : plan d'abonnement configurable par le super-admin.
+/// Noms, limites et prix sont des PLACEHOLDERS à définir par Ayoub :
+/// une limite null = non définie (non appliquée), un prix null = à définir.
+model Plan {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code             String   @unique
+  name             String
+  maxStudents      Int?
+  maxStaff         Int?
+  trialDays        Int?
+  priceMinor       Int?
+  currency         String   @default("MAD")
+  toBeDefined      Boolean  @default(true)
+  isActive         Boolean  @default(true)
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+enum InvoiceStatus {
+  draft
+  issued
+  void
+}
+
+/// Lot 9 : préparation de la facturation (aucun paiement réel).
+model Invoice {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String        @db.Uuid
+  status       InvoiceStatus @default(draft)
+  periodStart  DateTime      @db.Date
+  periodEnd    DateTime      @db.Date
+  planCode     String?
+  currency     String        @default("MAD")
+  /// null tant que le prix du plan n'est pas défini.
+  amountMinor  Int?
+  lines        Json
+  provider     String        @default("none")
+  providerRef  String?
+  createdById  String?       @db.Uuid
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, createdAt])
+}
+
+/// Lot 9 : instantané d'usage d'une école (suivi dans le temps).
+model UsageSnapshot {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId  String   @db.Uuid
+  takenAt   DateTime @default(now())
+  metrics   Json
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, takenAt])
+}
+
+// -----------------------------------------------------------------------------
+// Bloc 4 : bus (statut seul), export des donnees personnelles, droits RGPD/09-08
+// -----------------------------------------------------------------------------
+
+/// Statut du bus pour un eleve et une date : jamais de position ni de carte.
+enum BusStatus {
+  not_planned
+  waiting
+  on_board
+  dropped_off
+  absent
+}
+
+model StudentBusStatus {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String    @db.Uuid
+  studentId   String    @db.Uuid
+  date        DateTime  @db.Date
+  status      BusStatus
+  updatedById String?   @db.Uuid
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, date])
+  @@index([schoolId, date])
+}
+
+enum DataExportStatus {
+  pending
+  processing
+  ready
+  failed
+  expired
+}
+
+/// Droit d'acces : export JSON + PDF genere de facon asynchrone, disponible 7 jours.
+model DataExportRequest {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String           @db.Uuid
+  schoolId    String           @db.Uuid
+  status      DataExportStatus @default(pending)
+  requestedAt DateTime         @default(now())
+  startedAt   DateTime?
+  readyAt     DateTime?
+  expiresAt   DateTime?
+  jsonFileId  String?          @unique @db.Uuid
+  pdfFileId   String?          @unique @db.Uuid
+  error       String?
+
+  user     User        @relation("DataExports", fields: [userId], references: [id], onDelete: Cascade)
+  school   School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  jsonFile StoredFile? @relation("ExportJson", fields: [jsonFileId], references: [id], onDelete: SetNull)
+  pdfFile  StoredFile? @relation("ExportPdf", fields: [pdfFileId], references: [id], onDelete: SetNull)
+
+  @@index([status, requestedAt])
+  @@index([userId])
+}
+
+enum DataRightsKind {
+  rectification
+  opposition
+}
+
+enum DataRightsStatus {
+  open
+  closed
+}
+
+/// Droit de rectification / d'opposition : demande tracee adressee a l'ecole, sans modification automatique.
+model DataRightsRequest {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String           @db.Uuid
+  userId      String           @db.Uuid
+  kind        DataRightsKind
+  subject     String
+  message     String
+  status      DataRightsStatus @default(open)
+  createdAt   DateTime         @default(now())
+  handledAt   DateTime?
+  handledById String?          @db.Uuid
+  response    String?
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user   User   @relation("DataRightsRequests", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, status])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Bloc 5 (Avenant n 1) : facturation ecole. L'ecole collecte 120 DH TTC par enfant
+// et par an aupres des familles et effectue UN virement a ORYA. Aucun paiement
+// parent en ligne, aucun PSP. Documents emis immuables (triggers 010_rls.sql),
+// numerotation continue sans trou par serie et par annee (InvoiceSequence).
+// ---------------------------------------------------------------------------
+enum SchoolBillingStatus {
+  trial
+  invoiced
+  paid
+  overdue
+  suspended
+}
+
+enum SchoolInvoiceKind {
+  invoice
+  complementary
+  credit_note
+}
+
+/// Un contrat par ecole ; prix parametrable (defaut 100 DH HT, TVA 20 %, 120 DH TTC).
+model SchoolContract {
+  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId          String              @unique @db.Uuid
+  reference         String              @unique
+  unitPriceHtMinor  Int                 @default(10000)
+  vatRateBp         Int                 @default(2000)
+  unitPriceTtcMinor Int                 @default(12000)
+  currency          String              @default("MAD")
+  status            SchoolBillingStatus @default(trial)
+  trialEndsOn       DateTime?           @db.Date
+  paymentTermDays   Int                 @default(30)
+  noticeDays        Int                 @default(15)
+  /// Date de reference du comptage "MM-JJ" dans l'annee scolaire (defaut 31 octobre).
+  referenceMonthDay String              @default("10-31")
+  statusChangedAt   DateTime?
+  createdById       String?             @db.Uuid
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  school   School          @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  invoices SchoolInvoice[]
+}
+
+/// Facture annuelle, facture complementaire ou avoir. Emise directement (pas de brouillon), jamais modifiee.
+model SchoolInvoice {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId          String            @db.Uuid
+  contractId        String            @db.Uuid
+  kind              SchoolInvoiceKind
+  number            String            @unique
+  series            String
+  year              Int
+  seq               Int
+  /// "ecole:annee" pour la facture annuelle uniquement (une seule par ecole et par annee scolaire).
+  annualKey         String?           @unique
+  schoolYear        String
+  referenceDate     DateTime          @db.Date
+  issuedAt          DateTime          @default(now())
+  dueDate           DateTime          @db.Date
+  quantity          Int
+  unitPriceHtMinor  Int
+  vatRateBp         Int
+  totalHtMinor      Int
+  totalVatMinor     Int
+  totalTtcMinor     Int
+  currency          String            @default("MAD")
+  relatedInvoiceId  String?           @db.Uuid
+  reason            String?
+  /// Identifiants (pseudonymes) des eleves comptes ; aucun nom.
+  countedStudentIds Json
+  issuer            Json
+  client            Json
+  createdById       String?           @db.Uuid
+
+  school      School          @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  contract    SchoolContract  @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  related     SchoolInvoice?  @relation("SchoolInvoiceCorrections", fields: [relatedInvoiceId], references: [id], onDelete: Restrict)
+  corrections SchoolInvoice[] @relation("SchoolInvoiceCorrections")
+  payments    SchoolPayment[]
+
+  @@unique([series, year, seq])
+  @@index([schoolId, issuedAt])
+}
+
+/// Rapprochement manuel d'un virement recu (super-admin + MFA, audite). Jamais modifie.
+model SchoolPayment {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId      String   @db.Uuid
+  invoiceId     String   @db.Uuid
+  amountMinor   Int
+  receivedOn    DateTime @db.Date
+  bankReference String
+  note          String?
+  recordedById  String   @db.Uuid
+  createdAt     DateTime @default(now())
+
+  school  School        @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  invoice SchoolInvoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@index([schoolId, receivedOn])
+}
+
+/// Compteur transactionnel de numerotation (serie FA = factures et complementaires, AV = avoirs).
+model InvoiceSequence {
+  series    String
+  year      Int
+  lastValue Int    @default(0)
+
+  @@id([series, year])
+}
+
+/// t92 (CDC M2) : calendrier de l'établissement (une ligne par école, absente = valeurs par défaut).
+model SchoolCalendar {
+  schoolId    String   @id @db.Uuid
+  /// Jours ouvrés ISO : 1 = lundi … 7 = dimanche.
+  workingDays Int[]    @default([1, 2, 3, 4, 5, 6])
+  updatedById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+}
+
+/// t92 (CDC M2) : période de vacances ou jour férié (bornes incluses, dates civiles).
+model SchoolHoliday {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String   @db.Uuid
+  label       String
+  startDate   DateTime @db.Date
+  endDate     DateTime @db.Date
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, startDate])
+}
+
+/// t92 (CDC M7) : evaluation saisie par l'enseignant de la classe (ou la direction).
+/// Les resultats ne sont visibles des familles et de l'eleve qu'apres publication.
+model Assessment {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId      String    @db.Uuid
+  classroomId   String    @db.Uuid
+  schoolYear    String
+  subject       String
+  title         String
+  date          DateTime  @db.Date
+  maxScore      Int       @default(20)
+  createdById   String?   @db.Uuid
+  publishedAt   DateTime?
+  publishedById String?   @db.Uuid
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  school    School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classroom Classroom          @relation(fields: [classroomId], references: [id], onDelete: Restrict)
+  results   AssessmentResult[]
+
+  @@index([schoolId, classroomId, date])
+}
+
+/// t92 (CDC M7) : resultat d'un eleve a une evaluation (note sur maxScore, ou absent).
+model AssessmentResult {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String   @db.Uuid
+  assessmentId String   @db.Uuid
+  studentId    String   @db.Uuid
+  score        Float?
+  absent       Boolean  @default(false)
+  comment      String?
+  updatedById  String?  @db.Uuid
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  school     School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([assessmentId, studentId])
+  @@index([schoolId, studentId])
+}
+
+/// Sens de la tournée : aller (domicile -> école) ou retour (école -> domicile).
+enum TripDirection {
+  pickup
+  dropoff
+}
+
+/// Statut de la tournée de transport en direct.
+enum TripStatus {
+  planned
+  in_progress
+  completed
+  cancelled
+}
+
+/// Événement de passage d'un bus à un arrêt.
+enum StopEventType {
+  arrived
+  departed
+  students_dropped
+}
+
+/// Véhicule affecté au transport scolaire.
+model BusVehicle {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId    String   @db.Uuid
+  plateNumber String
+  model       String?
+  capacity    Int?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  school   School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  circuits BusCircuit[]
+  trips    BusTrip[]
+
+  @@unique([schoolId, plateNumber])
+  @@index([schoolId])
+}
+
+/// Circuit de transport (nom, véhicule, arrêts, élèves, chauffeur).
+model BusCircuit {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId           String   @db.Uuid
+  name               String
+  attendantProfileId String?  @db.Uuid
+  vehicleId          String?  @db.Uuid
+  color              String?
+  active             Boolean  @default(true)
+  createdById        String?  @db.Uuid
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  school    School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  attendant UserProfile?        @relation(fields: [attendantProfileId], references: [id], onDelete: SetNull)
+  vehicle   BusVehicle?         @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  stops     BusStop[]
+  students  BusCircuitStudent[]
+  trips     BusTrip[]
+
+  @@unique([schoolId, name])
+  @@index([schoolId, attendantProfileId])
+  @@index([schoolId, vehicleId])
+}
+
+/// Arrêt d'un circuit avec coordonnées GPS pour le suivi en direct.
+model BusStop {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId     String   @db.Uuid
+  circuitId    String   @db.Uuid
+  name         String
+  position     Int
+  latitude     Float?
+  longitude    Float?
+  address      String?
+  radiusMeters Int      @default(50)
+  createdAt    DateTime @default(now())
+
+  school           School                     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  circuit          BusCircuit                 @relation(fields: [circuitId], references: [id], onDelete: Cascade)
+  students         BusCircuitStudent[]
+  stopEvents       BusTripStopEvent[]
+  notificationLogs TransportNotificationLog[]
+
+  @@unique([circuitId, position])
+  @@index([schoolId])
+}
+
+/// Élève inscrit à un circuit (un seul circuit par élève), arrêt facultatif.
+model BusCircuitStudent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId  String   @db.Uuid
+  circuitId String   @db.Uuid
+  studentId String   @unique @db.Uuid
+  stopId    String?  @db.Uuid
+  createdAt DateTime @default(now())
+
+  school  School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  circuit BusCircuit @relation(fields: [circuitId], references: [id], onDelete: Cascade)
+  student Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  stop    BusStop?   @relation(fields: [stopId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, circuitId])
+}
+
+/// Tournée de transport scolaire en direct.
+model BusTrip {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId        String        @db.Uuid
+  circuitId       String        @db.Uuid
+  driverProfileId String        @db.Uuid
+  vehicleId       String?       @db.Uuid
+  direction       TripDirection @default(dropoff)
+  status          TripStatus    @default(planned)
+  startedAt       DateTime?
+  endedAt         DateTime?
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  school        School                     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  circuit       BusCircuit                 @relation(fields: [circuitId], references: [id], onDelete: Cascade)
+  driver        UserProfile                @relation("DriverTrips", fields: [driverProfileId], references: [id], onDelete: Cascade)
+  vehicle       BusVehicle?                @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  positions     BusTripPosition[]
+  stopEvents    BusTripStopEvent[]
+  notifications TransportNotificationLog[]
+
+  @@index([schoolId, circuitId, status])
+  @@index([schoolId, driverProfileId, status])
+}
+
+/// Coordonnée GPS d'une tournée en cours (rétention 30 jours pour conformité CNDP).
+model BusTripPosition {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId   String   @db.Uuid
+  tripId     String   @db.Uuid
+  latitude   Float
+  longitude  Float
+  speed      Float?
+  heading    Float?
+  accuracy   Float?
+  recordedAt DateTime @default(now())
+
+  school School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  trip   BusTrip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, tripId, recordedAt(sort: Desc)])
+  @@index([tripId, recordedAt(sort: Desc)])
+}
+
+/// Événement de passage à un arrêt (arrivée, dépose).
+model BusTripStopEvent {
+  id         String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId   String        @db.Uuid
+  tripId     String        @db.Uuid
+  stopId     String        @db.Uuid
+  eventType  StopEventType
+  recordedAt DateTime      @default(now())
+
+  school School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  trip   BusTrip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  stop   BusStop @relation(fields: [stopId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, tripId])
+  @@index([tripId, stopId])
+}
+
+/// Journal d'alerte parent idempotente (anti-doublon strict).
+model TransportNotificationLog {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  schoolId         String   @db.Uuid
+  tripId           String   @db.Uuid
+  studentId        String   @db.Uuid
+  stopId           String?  @db.Uuid
+  notificationType String
+  channel          String   @default("in_app")
+  sentAt           DateTime @default(now())
+
+  school  School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  trip    BusTrip  @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  student Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  stop    BusStop? @relation(fields: [stopId], references: [id], onDelete: SetNull)
+
+  @@unique([tripId, studentId, notificationType])
+  @@index([schoolId, tripId])
+}

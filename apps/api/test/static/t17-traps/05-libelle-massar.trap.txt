@@ -1,0 +1,1 @@
+export const label = "Les absences sont synchronisées avec Massar chaque soir.";
